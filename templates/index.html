@@ -280,6 +280,7 @@ table tr:hover .cp{opacity:1}
     <button class="btn" onclick="submitLicense()" id="licenseBtn">Activate</button>
     <div class="loader" id="licenseLoader"></div>
     <div id="licenseErr"></div>
+    <div style="margin-top:18px;font-size:11px;color:var(--text3)">No key? <a href="/store" target="_blank" style="color:var(--amber);text-decoration:none;font-weight:600">Purchase a license</a></div>
   </div>
 </div>
 
@@ -297,6 +298,7 @@ table tr:hover .cp{opacity:1}
         <button data-p="signups" onclick="go('signups')">Signups <span class="bdg" id="sBadge" style="display:none">0</span></button>
         <button data-p="hits" onclick="go('hits')">Hits <span class="bdg" id="hBadge" style="display:none">0</span></button>
         <button data-p="settings" onclick="go('settings')">Settings</button>
+        <button onclick="window.open('/store','_blank')" style="background:rgba(245,158,11,.06);color:var(--amber);font-weight:600">Store</button>
       </div>
     </div>
     <div class="tr">

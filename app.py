@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 BASE_DIR = Path(__file__).parent
 
 # ── License server imports ──────────────────────────────────────────
-from flask import Flask, render_template, render_template_string, request, jsonify, redirect, url_for
+from flask import Flask, render_template, render_template_string, request, jsonify, redirect, url_for, session
 from flask_socketio import SocketIO, emit
 
 # ── Pantoo checker imports ──────────────────────────────────────────
@@ -35,6 +35,24 @@ DURATIONS = {
     '365d': {'label': '1 Year', 'days': 365}, 'lifetime': {'label': 'Lifetime', 'days': None},
 }
 
+# ── Store / Pricing ──────────────────────────────────────────────────
+STORE_CONFIG = {
+    'prices': {
+        'basic':    {'usd': 4.99,  'btc': 0.00008, 'eth': 0.0015, 'ltc': 0.015},
+        'pro':      {'usd': 14.99, 'btc': 0.00025, 'eth': 0.0045, 'ltc': 0.045},
+        'premium':  {'usd': 29.99, 'btc': 0.00050, 'eth': 0.0090, 'ltc': 0.090},
+    },
+    'durations': {
+        'basic':    '30d',
+        'pro':      '30d',
+        'premium':  '30d',
+    },
+    'wallet_btc': os.environ.get('WAFFLE_BTC', 'bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh'),
+    'wallet_eth': os.environ.get('WAFFLE_ETH', '0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18'),
+    'wallet_ltc': os.environ.get('WAFFLE_LTC', 'ltc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh'),
+}
+ORDERS_FILE = BASE_DIR / 'orders.json'
+
 def lic_load():
     if LICENSES_FILE.exists():
         try: return json.loads(LICENSES_FILE.read_text(encoding='utf-8'))
@@ -53,6 +71,35 @@ def get_admin_key():
         data['admin_key'] = gen_admin_key()
         lic_save(data)
     return data['admin_key']
+
+def load_orders():
+    if ORDERS_FILE.exists():
+        try: return json.loads(ORDERS_FILE.read_text(encoding='utf-8'))
+        except: pass
+    return []
+
+def save_orders(orders):
+    ORDERS_FILE.write_text(json.dumps(orders, indent=2), encoding='utf-8')
+
+def create_order(plan, duration, payer_email=''):
+    orders = load_orders()
+    order_id = ''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(12))
+    prices = STORE_CONFIG['prices'].get(plan, {})
+    order = {
+        'id': order_id,
+        'plan': plan,
+        'duration': duration,
+        'created': datetime.now().isoformat(),
+        'status': 'pending',
+        'payer_email': payer_email,
+        'price_usd': prices.get('usd', 0),
+        'price_btc': prices.get('btc', 0),
+        'price_eth': prices.get('eth', 0),
+        'price_ltc': prices.get('ltc', 0),
+    }
+    orders.insert(0, order)
+    save_orders(orders)
+    return order
 
 def gen_license_key():
     alpha = string.ascii_uppercase + string.digits
@@ -369,33 +416,47 @@ def api_unrevoke():
     lic_save(licenses)
     return jsonify({'ok': True, 'message': f'Key {key} un-revoked'})
 
-# ── Admin panel ─────────────────────────────────────────────────────
+# ── Admin panel (session-gated) ─────────────────────────────────────
+@app.route('/admin/logout')
+def admin_logout():
+    session.pop('admin_auth', None)
+    return redirect(url_for('admin_panel'))
 @app.route('/admin', methods=['GET', 'POST'])
 def admin_panel():
     admin_key = get_admin_key()
-    message = None
+    # POST: login or key generation
     if request.method == 'POST':
+        # Login attempt
         sk = request.form.get('admin_key', '')
-        if sk != admin_key: return redirect(url_for('admin_panel', error='unauthorized'))
+        if sk:
+            if sk == admin_key:
+                session['admin_auth'] = True
+                session['admin_auth_at'] = time.time()
+                return redirect(url_for('admin_panel'))
+            return redirect(url_for('admin_panel', error='unauthorized'))
+        # Key generation (must be logged in)
+        if not session.get('admin_auth'):
+            return redirect(url_for('admin_panel', error='unauthorized'))
         plan = request.form.get('plan', 'basic')
         duration = request.form.get('duration', '30d')
         notes = request.form.get('notes', '')
-        if plan not in PLANS: return redirect(url_for('admin_panel', error='invalid_plan'))
-        if duration not in DURATIONS: return redirect(url_for('admin_panel', error='invalid_duration'))
-        key = gen_license_key()
-        kd = {'plan': plan, 'created': datetime.now().isoformat(), 'notes': notes, 'activated': False, 'revoked': False, 'total_checks': 0, 'daily_usage': {}}
-        if DURATIONS[duration]['days'] is not None:
-            kd['expires'] = (datetime.now() + timedelta(days=DURATIONS[duration]['days'])).isoformat()
-        licenses = lic_load()
-        licenses['keys'][key] = kd
-        lic_save(licenses)
-        return redirect(url_for('admin_panel', ok='1', key=key, plan=plan, dur=DURATIONS[duration]['label']))
+        if plan in PLANS and duration in DURATIONS:
+            key = gen_license_key()
+            kd = {'plan': plan, 'created': datetime.now().isoformat(), 'notes': notes, 'activated': False, 'revoked': False, 'total_checks': 0, 'daily_usage': {}}
+            if DURATIONS[duration]['days'] is not None:
+                kd['expires'] = (datetime.now() + timedelta(days=DURATIONS[duration]['days'])).isoformat()
+            licenses = lic_load()
+            licenses['keys'][key] = kd
+            lic_save(licenses)
+            return redirect(url_for('admin_panel', ok='1', key=key, plan=plan, dur=DURATIONS[duration]['label']))
+        return redirect(url_for('admin_panel', error='unauthorized'))
+    # GET: check session
+    if not session.get('admin_auth'):
+        return render_template_string(ADMIN_LOGIN_HTML)
+    message = None
     msg_key = request.args.get('key')
-    if msg_key:
-        message = ('ok', msg_key, request.args.get('plan',''), request.args.get('dur',''))
+    if msg_key: message = ('ok', msg_key, request.args.get('plan',''), request.args.get('dur',''))
     elif request.args.get('error') == 'unauthorized': message = ('error', 'Unauthorized')
-    elif request.args.get('error') == 'invalid_plan': message = ('error', 'Invalid plan')
-    elif request.args.get('error') == 'invalid_duration': message = ('error', 'Invalid duration')
     licenses = lic_load()
     keys_list = sorted(licenses['keys'].items(), key=lambda x: x[1].get('created',''), reverse=True)
     today = datetime.now().strftime('%Y-%m-%d')
@@ -403,7 +464,59 @@ def admin_panel():
     active_keys = sum(1 for _,v in keys_list if v.get('activated') and not v.get('revoked') and (not v.get('expires') or datetime.fromisoformat(v['expires']) >= datetime.now()))
     revoked_keys = sum(1 for _,v in keys_list if v.get('revoked'))
     total_checks_all = sum(v.get('total_checks',0) for _,v in keys_list)
-    return render_template_string(ADMIN_HTML, admin_key=admin_key, message=message, keys=keys_list, PLANS=PLANS, today=today, datetime=datetime, total_keys=total_keys, active_keys=active_keys, revoked_keys=revoked_keys, total_checks_all=total_checks_all)
+    orders = load_orders()
+    pending_orders = [o for o in orders if o['status'] == 'pending']
+    return render_template_string(ADMIN_HTML, admin_key=admin_key, message=message, keys=keys_list, PLANS=PLANS, today=today, datetime=datetime, total_keys=total_keys, active_keys=active_keys, revoked_keys=revoked_keys, total_checks_all=total_checks_all, orders=orders, pending_orders=pending_orders, store=STORE_CONFIG)
+
+# ── Store routes ─────────────────────────────────────────────────────
+@app.route('/store')
+def store_page():
+    return render_template_string(STORE_HTML, plans=PLANS, store=STORE_CONFIG, durations=DURATIONS)
+
+@app.route('/api/store/plans')
+def api_store_plans():
+    return jsonify({'ok': True, 'plans': {k: {'name': v['name'], 'price': STORE_CONFIG['prices'].get(k, {}), 'duration': STORE_CONFIG['durations'].get(k, '30d'), 'features': {'max_checks': v['max_checks'], 'max_checks_daily': v['max_checks_daily'], 'allow_signup': v['allow_signup'], 'max_workers': v['max_workers'], 'allow_proxy_rotation': v['allow_proxy_rotation']}} for k, v in PLANS.items()}, 'wallets': {k: v for k, v in STORE_CONFIG.items() if k.startswith('wallet_')}})
+
+@app.route('/api/create_order', methods=['POST'])
+def api_create_order():
+    data = request.get_json()
+    plan = data.get('plan', '')
+    duration = data.get('duration', '30d')
+    email = data.get('email', '')
+    if plan not in PLANS: return jsonify({'ok': False, 'error': 'Invalid plan'})
+    order = create_order(plan, duration, email)
+    prices = STORE_CONFIG['prices'].get(plan, {})
+    return jsonify({'ok': True, 'order': order, 'payment': {'btc_address': STORE_CONFIG['wallet_btc'], 'eth_address': STORE_CONFIG['wallet_eth'], 'ltc_address': STORE_CONFIG['wallet_ltc'], 'amount_btc': prices.get('btc', 0), 'amount_eth': prices.get('eth', 0), 'amount_ltc': prices.get('ltc', 0), 'amount_usd': prices.get('usd', 0)}})
+
+@app.route('/api/orders', methods=['GET'])
+def api_orders():
+    orders = load_orders()
+    return jsonify({'ok': True, 'orders': orders})
+
+@app.route('/api/confirm_order', methods=['POST'])
+def api_confirm_order():
+    data = request.get_json()
+    oid = data.get('order_id', '')
+    if not oid: return jsonify({'ok': False, 'error': 'No order ID'})
+    orders = load_orders()
+    for o in orders:
+        if o['id'] == oid:
+            o['status'] = 'paid'
+            o['paid_at'] = datetime.now().isoformat()
+            # Generate a license key
+            key = gen_license_key()
+            plan = o['plan']
+            duration = o.get('duration', STORE_CONFIG['durations'].get(plan, '30d'))
+            kd = {'plan': plan, 'created': datetime.now().isoformat(), 'notes': f"Order {oid}", 'activated': False, 'revoked': False, 'total_checks': 0, 'daily_usage': {}}
+            if DURATIONS[duration]['days'] is not None:
+                kd['expires'] = (datetime.now() + timedelta(days=DURATIONS[duration]['days'])).isoformat()
+            licenses = lic_load()
+            licenses['keys'][key] = kd
+            lic_save(licenses)
+            o['generated_key'] = key
+            save_orders(orders)
+            return jsonify({'ok': True, 'order': o, 'key': key})
+    return jsonify({'ok': False, 'error': 'Order not found'})
 
 # ── Web app routes ──────────────────────────────────────────────────
 @app.route('/')
@@ -620,7 +733,39 @@ def handle_get_dashboard():
 def handle_get_scan_history():
     emit('scan_history', {'history': load_scan_history()})
 
-# ── Admin panel HTML (same as before with Waffles branding) ────────
+# ── Admin login page ─────────────────────────────────────────────────
+ADMIN_LOGIN_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Waffles · Admin Login</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,'SF Pro Display','Helvetica Neue',sans-serif;background:#07070e;color:#eeeef5;min-height:100vh;display:flex;align-items:center;justify-content:center;-webkit-font-smoothing:antialiased}
+.lg-in{text-align:center;max-width:340px;width:90%}
+.lg-in .lg{font-size:48px;font-weight:800;background:linear-gradient(135deg,#f0f0f5,#f59e0b);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:4px}
+.lg-in .sub{font-size:11px;color:#4a4a5a;margin-bottom:32px;letter-spacing:1px;text-transform:uppercase}
+.lg-in input{width:100%;padding:14px 18px;background:#0c0c14;border:1px solid rgba(255,255,255,.05);border-radius:12px;color:#eeeef5;font-size:13px;outline:none;text-align:center;font-family:monospace;letter-spacing:2px;transition:all .25s}
+.lg-in input:focus{border-color:#f59e0b;box-shadow:0 0 0 3px rgba(245,158,11,.1)}
+.lg-in button{margin-top:14px;width:100%;padding:14px;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;background:linear-gradient(135deg,#fbbf24,#f59e0b);color:#0a0a12;transition:all .25s;font-family:inherit}
+.lg-in button:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(245,158,11,.3)}
+.lg-in .err{color:#f87171;font-size:12px;margin-top:12px;min-height:1.2em}
+</style>
+</head>
+<body>
+<div class="lg-in">
+  <div class="lg">Waffles</div>
+  <div class="sub">Admin Login</div>
+  <form method="POST">
+    <input type="text" name="admin_key" placeholder="Enter admin key" autocomplete="off" spellcheck="false" autofocus>
+    <button type="submit">Unlock</button>
+  </form>
+  <div class="err">{% if request.args.get('error') == 'unauthorized' %}Invalid key{% endif %}</div>
+</div>
+</body>
+</html>"""
+
 ADMIN_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -641,7 +786,7 @@ body{font-family:-apple-system,'SF Pro Display','SF Pro Text','Helvetica Neue',s
 .sb .ak-c .cpy{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.05);color:#5a5a6a;padding:6px 14px;border-radius:8px;cursor:pointer;font-size:9px;transition:all .2s;width:100%;font-weight:500;letter-spacing:.3px;font-family:inherit}
 .sb .ak-c .cpy:hover{background:rgba(255,255,255,.07);color:#eeeef5;border-color:rgba(255,255,255,.1)}
 .sb .nv{display:flex;flex-direction:column;gap:3px;position:relative}
-.sb .nv a{color:#4a4a5a;text-decoration:none;font-size:12px;padding:9px 14px;border-radius:10px;transition:all .2s;font-weight:500;display:flex;align-items:center;gap:10px}
+.sb .nv a{color:#4a4a5a;text-decoration:none;font-size:12px;padding:9px 14px;border-radius:10px;transition:all .2s;font-weight:500;display:flex;align-items:center;gap:10px;cursor:pointer}
 .sb .nv a:hover{background:rgba(255,255,255,.03);color:#c0c0d0}
 .sb .nv a.act{background:rgba(245,158,11,.07);color:#f59e0b;font-weight:600}
 .sb .nv a.act::before{content:'';width:3px;height:16px;background:#f59e0b;border-radius:2px;margin-left:-14px;box-shadow:0 0 10px rgba(245,158,11,.3)}
@@ -663,6 +808,7 @@ body{font-family:-apple-system,'SF Pro Display','SF Pro Text','Helvetica Neue',s
 .gc{background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.04);border-radius:16px;padding:24px 28px;margin-bottom:24px;transition:border-color .3s}
 .gc:hover{border-color:rgba(255,255,255,.07)}
 .gc h2{font-size:10px;color:#5a5a6a;text-transform:uppercase;letter-spacing:.7px;margin-bottom:18px;font-weight:600}
+.gc h2 .bdg-o{display:inline-flex;background:#f59e0b;color:#0a0a12;padding:1px 8px;border-radius:20px;font-size:9px;margin-left:8px;font-weight:700}
 .gf{display:flex;gap:12px;flex-wrap:wrap;align-items:end}
 .gf .fd{min-width:150px;flex:1}
 .gf label{font-size:9px;color:#5a5a6a;display:block;margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px;font-weight:600}
@@ -673,7 +819,8 @@ body{font-family:-apple-system,'SF Pro Display','SF Pro Text','Helvetica Neue',s
 .btn::after{content:'';position:absolute;top:0;left:0;right:0;bottom:0;background:linear-gradient(180deg,rgba(255,255,255,.2) 0%,transparent 50%);border-radius:10px;pointer-events:none}
 .btn:hover{transform:translateY(-2px);box-shadow:0 8px 30px rgba(245,158,11,.35)}
 .btn:active{transform:translateY(0);box-shadow:0 2px 10px rgba(245,158,11,.2)}
-.tw{background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.04);border-radius:16px;overflow:hidden}
+.btn-sm{padding:6px 14px;font-size:10px}
+.tw{background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.04);border-radius:16px;overflow:hidden;margin-bottom:24px}
 .tw-h{display:flex;align-items:center;justify-content:space-between;padding:18px 22px;border-bottom:1px solid rgba(255,255,255,.04)}
 .tw-h h2{font-size:10px;color:#5a5a6a;text-transform:uppercase;letter-spacing:.7px;font-weight:600}
 .tw-h span{font-size:11px;color:#3a3a4a;font-weight:500;background:rgba(255,255,255,.03);padding:2px 10px;border-radius:20px}
@@ -694,12 +841,20 @@ body{font-family:-apple-system,'SF Pro Display','SF Pro Text','Helvetica Neue',s
 .msg .mb{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.06);color:#5a5a6a;padding:5px 14px;border-radius:8px;cursor:pointer;font-size:10px;margin-left:auto;white-space:nowrap;transition:all .2s;font-family:inherit}
 .msg .mb:hover{background:rgba(255,255,255,.08);color:#eeeef5;border-color:rgba(255,255,255,.1)}
 .kc{color:#5a5a6a;font-size:11px;font-family:'SF Mono','SF Pro',monospace;letter-spacing:.2px}
-.em2{background:rgba(255,255,255,.015);border-radius:10px;padding:6px 12px;font-size:10px;color:#3a3a4a}
+.emp{background:rgba(255,255,255,.015);border-radius:10px;padding:6px 12px;font-size:10px;color:#3a3a4a}
+.tb-toggle{display:none}
 @keyframes sl{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:translateY(0)}}
 @keyframes fIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
 @media(max-width:900px){.sb{width:200px;padding:24px 16px}.mn{padding:28px 24px}.gf .fd{min-width:120px}}
 @media(max-width:700px){.sb{display:none}.mn{padding:20px 16px}}
 </style>
+<script>
+function showTab(tab) {
+  document.querySelectorAll('.tb-toggle').forEach(t => t.style.display = 'none');
+  document.getElementById(tab).style.display = 'block';
+  document.querySelectorAll('.nv a').forEach(a => a.classList.toggle('act', a.dataset.tab === tab));
+}
+</script>
 </head>
 <body>
 <div class="sb">
@@ -710,13 +865,18 @@ body{font-family:-apple-system,'SF Pro Display','SF Pro Text','Helvetica Neue',s
     <button class="cpy" onclick="navigator.clipboard.writeText('{{ admin_key }}').then(()=>{this.textContent='Copied';setTimeout(()=>this.textContent='Copy',1800)})">Copy</button>
   </div>
   <div class="nv">
-    <a href="#" class="act">Dashboard</a>
+    <a class="act" data-tab="tabKeys" onclick="showTab('tabKeys')">Keys</a>
+    <a data-tab="tabOrders" onclick="showTab('tabOrders')">Orders{% if pending_orders %} <span style="display:inline-flex;background:#f87171;color:#fff;border-radius:10px;padding:1px 7px;font-size:9px;font-weight:700;margin-left:auto">{{ pending_orders|length }}</span>{% endif %}</a>
+    <a data-tab="tabStore" onclick="showTab('tabStore')">Store Settings</a>
   </div>
   <div class="ft">Waffles License Server v2.0</div>
 </div>
 <div class="mn">
   <h1>Dashboard</h1>
-  <div class="sub">License key management</div>
+  <div class="sub">License & order management</div>
+
+  <!-- Tab: Keys (default) -->
+  <div class="tb-toggle" id="tabKeys" style="display:block">
   <div class="cds">
     <div class="c c1"><div class="c-n" style="color:#fbbf24">{{ total_keys }}</div><div class="c-l">Total Keys</div></div>
     <div class="c c2"><div class="c-n" style="color:#34d399">{{ active_keys }}</div><div class="c-l">Activated</div></div>
@@ -739,7 +899,6 @@ body{font-family:-apple-system,'SF Pro Display','SF Pro Text','Helvetica Neue',s
   <div class="gc">
     <h2>Generate New Key</h2>
     <form method="POST" action="/admin">
-      <input type="hidden" name="admin_key" value="{{ admin_key }}">
       <div class="gf">
         <div class="fd"><label>Plan</label><select name="plan"><option value="basic">Basic</option><option value="pro">Pro</option><option value="premium">Premium</option></select></div>
         <div class="fd"><label>Duration</label><select name="duration"><option value="1d">1 Day</option><option value="7d">7 Days</option><option value="30d" selected>30 Days</option><option value="90d">90 Days</option><option value="365d">1 Year</option><option value="lifetime">Lifetime</option></select></div>
@@ -774,7 +933,172 @@ body{font-family:-apple-system,'SF Pro Display','SF Pro Text','Helvetica Neue',s
     <div style="padding:48px 20px;text-align:center;color:#3a3a4a;font-size:14px;font-weight:400">No keys yet. Generate one above.</div>
     {% endif %}
   </div>
+  </div>
+
+  <!-- Tab: Orders -->
+  <div class="tb-toggle" id="tabOrders">
+  <div class="tw">
+    <div class="tw-h"><h2>Orders</h2><span>{{ orders|length }} total</span></div>
+    {% if orders %}
+    <table class="t">
+      <thead><tr><th>Order ID</th><th>Plan</th><th>Created</th><th>Amount</th><th>Status</th><th>Action</th></tr></thead>
+      <tbody>
+      {% for o in orders %}
+        <tr>
+          <td class="kc" style="font-size:10px">{{ o.id }}</td>
+          <td><span class="bdg bdg-{{ o.plan }}">{{ PLANS[o.plan]['name'] }}</span></td>
+          <td style="color:#5a5a6a;font-size:10px">{{ datetime.fromisoformat(o.created).strftime('%b %d %H:%M') if o.created else '--' }}</td>
+          <td style="color:#fbbf24;font-weight:600">${{ o.price_usd }}</td>
+          <td>{% if o.status == 'pending' %}<span style="color:#fb923c;font-weight:600">Pending</span>{% elif o.status == 'paid' %}<span style="color:#34d399;font-weight:600">Paid</span>{% else %}<span style="color:#f87171">{{ o.status }}</span>{% endif %}</td>
+          <td>{% if o.status == 'pending' %}<form method="POST" action="/api/confirm_order" style="display:inline"><input type="hidden" name="order_id" value="{{ o.id }}"><button class="btn btn-sm" type="button" style="padding:3px 10px;font-size:9px" onclick="confirmOrder('{{ o.id }}')">Confirm</button></form>{% elif o.generated_key %}<span class="kc" style="font-size:9px">{{ o.generated_key }}</span>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div style="padding:48px 20px;text-align:center;color:#3a3a4a;font-size:14px">No orders yet.</div>
+    {% endif %}
+  </div>
+  </div>
+
+  <!-- Tab: Store Settings -->
+  <div class="tb-toggle" id="tabStore">
+  <div class="gc">
+    <h2>Payment Wallets</h2>
+    <div style="font-size:12px;color:#5a5a6a;line-height:2">
+      <strong style="color:#fbbf24">BTC:</strong> {{ store.wallet_btc }}<br>
+      <strong style="color:#a78bfa">ETH:</strong> {{ store.wallet_eth }}<br>
+      <strong style="color:#34d399">LTC:</strong> {{ store.wallet_ltc }}
+    </div>
+    <div style="margin-top:12px;font-size:10px;color:#3a3a4a">Set via env vars: WAFFLE_BTC, WAFFLE_ETH, WAFFLE_LTC</div>
+  </div>
+  <div class="gc">
+    <h2>Plan Prices</h2>
+    <table class="t">
+      <thead><tr><th>Plan</th><th>USD</th><th>BTC</th><th>ETH</th><th>LTC</th><th>Default Duration</th></tr></thead>
+      <tbody>
+      {% for pk, pv in PLANS.items() %}
+        {% set pr = store.prices.get(pk, {}) %}
+        <tr><td><span class="bdg bdg-{{ pk }}">{{ pv.name }}</span></td><td style="color:#fbbf24;font-weight:600">${{ pr.usd }}</td><td style="color:#5a5a6a">{{ pr.btc }}</td><td style="color:#5a5a6a">{{ pr.eth }}</td><td style="color:#5a5a6a">{{ pr.ltc }}</td><td style="color:#5a5a6a">{{ store.durations.get(pk, '30d') }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  </div>
 </div>
+<script>
+function confirmOrder(oid) {
+  if (!confirm('Confirm payment for order ' + oid + '? A license key will be generated.')) return;
+  fetch('/api/confirm_order', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({order_id:oid})})
+    .then(r=>r.json()).then(d=>{if(d.ok){alert('Key generated: '+d.key);location.reload()}else{alert('Error: '+d.error)}});
+}
+</script>
+</body>
+</html>"""
+
+# ── Store page HTML ──────────────────────────────────────────────────
+STORE_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Waffles · Store</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,'Inter','Helvetica Neue',sans-serif;background:#07070e;color:#eeeef5;min-height:100vh;-webkit-font-smoothing:antialiased}
+.hdr{text-align:center;padding:48px 20px 12px;position:relative}
+.hdr::after{content:'';position:absolute;bottom:0;left:50%;transform:translateX(-50%);width:200px;height:1px;background:linear-gradient(90deg,transparent,rgba(245,158,11,.15),transparent)}
+.hdr h1{font-size:38px;font-weight:800;letter-spacing:-1px;background:linear-gradient(135deg,#f0f0f5,#f59e0b);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.hdr .sub{font-size:12px;color:#4a4a5a;margin-top:4px;letter-spacing:1px;text-transform:uppercase}
+.plan-grid{display:flex;gap:16px;justify-content:center;padding:32px 20px 48px;flex-wrap:wrap;max-width:960px;margin:0 auto}
+.pc{background:rgba(255,255,255,.015);border:1px solid rgba(255,255,255,.04);border-radius:20px;padding:28px 24px;width:280px;transition:all .3s;position:relative;display:flex;flex-direction:column}
+.pc:hover{background:rgba(255,255,255,.025);border-color:rgba(255,255,255,.07);transform:translateY(-4px)}
+.pc.featured{border-color:rgba(245,158,11,.2);background:rgba(245,158,11,.02)}
+.pc.featured::before{content:'Popular';position:absolute;top:-10px;left:50%;transform:translateX(-50%);background:linear-gradient(135deg,#fbbf24,#f59e0b);color:#0a0a12;font-size:9px;font-weight:700;padding:3px 14px;border-radius:20px;text-transform:uppercase;letter-spacing:.5px}
+.pc .p-name{font-size:14px;font-weight:600;text-transform:uppercase;letter-spacing:.8px;color:#5a5a6a;margin-bottom:4px}
+.pc .p-price{font-size:36px;font-weight:800;letter-spacing:-1px;margin-bottom:16px}
+.pc .p-price small{font-size:14px;font-weight:400;color:#5a5a6a;letter-spacing:0}
+.pc .p-features{list-style:none;padding:0;margin:0 0 20px;flex:1}
+.pc .p-features li{padding:6px 0;font-size:12px;color:#c0c0d0;border-bottom:1px solid rgba(255,255,255,.02);display:flex;align-items:center;gap:8px}
+.pc .p-features li::before{content:'\\2713';color:#34d399;font-weight:700;flex-shrink:0}
+.pc .p-features li.na{color:#3a3a4a}
+.pc .p-features li.na::before{content:'\\2717';color:#f87171}
+.pc .btn{width:100%;padding:14px;border:none;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;background:linear-gradient(135deg,#fbbf24,#f59e0b);color:#0a0a12;transition:all .25s;font-family:inherit}
+.pc .btn:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(245,158,11,.3)}
+.pc .btn-sec{background:rgba(255,255,255,.04);color:#c0c0d0;border:1px solid rgba(255,255,255,.06)}
+.pc .btn-sec:hover{background:rgba(255,255,255,.07);box-shadow:none}
+.ft{text-align:center;padding:20px;font-size:11px;color:#2a2a3a}
+.modal-overlay{display:none;position:fixed;inset:0;z-index:999;background:rgba(8,8,14,.8);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);align-items:center;justify-content:center}
+.modal-overlay.show{display:flex}
+.modal{background:#0d0d16;border:1px solid rgba(255,255,255,.04);border-radius:20px;padding:32px;max-width:440px;width:90%;max-height:90vh;overflow-y:auto;animation:fadeUp .3s ease}
+.modal h2{font-size:20px;font-weight:700;margin-bottom:4px}
+.modal .sub{font-size:11px;color:#5a5a6a;margin-bottom:20px}
+.modal .qr{width:180px;height:180px;margin:16px auto;background:#fff;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:10px;color:#333;overflow:hidden}
+.modal .addr{background:#0c0c14;border:1px solid rgba(255,255,255,.04);border-radius:10px;padding:12px 14px;font-family:monospace;font-size:11px;color:#fbbf24;word-break:break-all;margin-bottom:12px;user-select:all}
+.modal .copy-btn{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.05);color:#5a5a6a;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:11px;transition:all .2s;font-family:inherit}
+.modal .copy-btn:hover{background:rgba(255,255,255,.07);color:#eeeef5}
+.modal .amt{display:flex;justify-content:space-between;padding:8px 0;font-size:13px;border-bottom:1px solid rgba(255,255,255,.03)}
+.modal .amt-l{color:#5a5a6a}
+.modal .amt-v{color:#fbbf24;font-weight:600;font-family:monospace}
+.modal .close-btn{margin-top:20px;width:100%;padding:12px;border:none;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;background:rgba(255,255,255,.03);color:#5a5a6a;font-family:inherit;transition:all .2s}
+.modal .close-btn:hover{background:rgba(255,255,255,.06);color:#eeeef5}
+@keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+</style>
+</head>
+<body>
+<div class="hdr">
+  <h1>Waffles</h1>
+  <div class="sub">Priv Service</div>
+  <div style="margin-top:16px;font-size:13px;color:#5a5a6a">Purchase a license to unlock the scanner</div>
+</div>
+<div class="plan-grid">
+  {% for pk, pv in plans.items() %}
+  {% set pr = store.prices.get(pk, {}) %}
+  <div class="pc{% if pk == 'pro' %} featured{% endif %}">
+    <div class="p-name">{{ pv.name }}</div>
+    <div class="p-price">${{ pr.usd }} <small>USD</small></div>
+    <ul class="p-features">
+      <li>{{ 'Unlimited' if not pv.max_checks_daily else pv.max_checks|string + '/day' }} checks</li>
+      <li class="{% if not pv.allow_signup %}na{% endif %}">{{ 'Signup support' if pv.allow_signup else 'No signup' }}</li>
+      <li>{{ pv.max_workers }} workers</li>
+      <li class="{% if not pv.allow_proxy_rotation %}na{% endif %}">{{ 'Proxy rotation' if pv.allow_proxy_rotation else 'No proxy rotation' }}</li>
+      <li>30 day validity</li>
+    </ul>
+    <button class="btn" onclick="buy('{{ pk }}')">Buy Now</button>
+  </div>
+  {% endfor %}
+</div>
+<div class="ft">Waffles Priv Service &copy; 2026</div>
+
+<div class="modal-overlay" id="modal">
+  <div class="modal">
+    <h2 id="mPlan"></h2>
+    <div class="sub">Send crypto to activate your license</div>
+    <div id="mDetails"></div>
+    <button class="close-btn" onclick="closeModal()">Close</button>
+  </div>
+</div>
+
+<script>
+async function buy(plan) {
+  const r = await fetch('/api/create_order', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({plan:plan, duration:'30d'})});
+  const d = await r.json();
+  if (!d.ok) { alert(d.error); return; }
+  const o = d.order, p = d.payment;
+  document.getElementById('mPlan').textContent = plan.charAt(0).toUpperCase() + plan.slice(1) + ' Plan';
+  document.getElementById('mDetails').innerHTML = `
+    <div class="amt"><span class="amt-l">Order ID</span><span class="amt-v" style="font-size:11px">${o.id}</span></div>
+    <div class="amt"><span class="amt-l">Amount (USD)</span><span class="amt-v">$${p.amount_usd}</span></div>
+    <div class="amt"><span class="amt-l">Amount (BTC)</span><span class="amt-v">${p.amount_btc} BTC</span></div>
+    <div style="margin-top:16px"><strong style="font-size:11px;color:#fbbf24">Bitcoin Address</strong></div>
+    <div class="addr" id="btcAddr">${p.btc_address}</div>
+    <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('btcAddr').textContent);this.textContent='Copied!'">Copy BTC Address</button>
+    <div style="margin-top:12px;font-size:11px;color:#5a5a6a;line-height:1.5">After sending payment, contact the admin with your order ID <strong style="color:#fbbf24">${o.id}</strong> to activate your license.</div>
+  `;
+  document.getElementById('modal').classList.add('show');
+}
+function closeModal() { document.getElementById('modal').classList.remove('show'); }
+</script>
 </body>
 </html>"""
 

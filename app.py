@@ -126,6 +126,18 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = 'waffles-deploy-secret!'
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
+# Print admin key on startup (visible in Render logs)
+_ADMIN_KEY = get_admin_key()
+_KEY_COUNT = len(lic_load().get('keys', {}))
+print(f"\n  {'='*50}")
+print(f"   Waffles Priv Service")
+print(f"  {'='*50}")
+print(f"   Admin panel:  /admin")
+print(f"   Admin key:    {_ADMIN_KEY}")
+print(f"   Keys stored:  {_KEY_COUNT}")
+print(f"   Store:        /store")
+print(f"  {'='*50}\n")
+
 # ── Web app state ───────────────────────────────────────────────────
 scan_thread = None
 stop_event = threading.Event()

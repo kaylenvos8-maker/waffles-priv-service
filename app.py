@@ -77,7 +77,7 @@ def get_hwid():
 # ── Create unified Flask app ────────────────────────────────────────
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'waffles-deploy-secret!'
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 # ── Web app state ───────────────────────────────────────────────────
 scan_thread = None

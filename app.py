@@ -300,23 +300,28 @@ def require_admin_kw():
 @app.route('/api/validate', methods=['POST'])
 def api_validate():
     data = request.get_json()
-    key = data.get('key', '').strip().upper()
-    if not key: return jsonify({'ok': False, 'error': 'No key provided'})
+    info = do_validate(key=data.get('key',''), hwid=data.get('hwid',''), remote_addr=request.remote_addr)
+    if info.get('ok'):
+        return jsonify(info)
+    return jsonify(info), 400
+
+def do_validate(key='', hwid='', remote_addr=None):
+    key = key.strip().upper()
+    if not key: return {'ok': False, 'error': 'No key provided'}
     licenses = lic_load()
     kd = licenses['keys'].get(key)
-    if not kd: return jsonify({'ok': False, 'error': 'Invalid key'})
-    if kd.get('revoked'): return jsonify({'ok': False, 'error': 'Key revoked'})
+    if not kd: return {'ok': False, 'error': 'Invalid key'}
+    if kd.get('revoked'): return {'ok': False, 'error': 'Key revoked'}
     if kd.get('expires') and datetime.fromisoformat(kd['expires']) < datetime.now():
-        return jsonify({'ok': False, 'error': 'Key expired'})
-    client_hwid = data.get('hwid', '')
-    if kd.get('hwid') and kd['hwid'] != client_hwid:
-        return jsonify({'ok': False, 'error': 'Key already in use on another machine'})
+        return {'ok': False, 'error': 'Key expired'}
+    if kd.get('hwid') and kd['hwid'] != hwid:
+        return {'ok': False, 'error': 'Key already in use on another machine'}
     if not kd.get('hwid'):
-        kd['hwid'] = client_hwid
+        kd['hwid'] = hwid
         kd['activated'] = True
         kd['activated_at'] = datetime.now().isoformat()
     kd['last_seen'] = datetime.now().isoformat()
-    kd['last_ip'] = request.remote_addr
+    kd['last_ip'] = remote_addr
     lic_save(licenses)
     plan_info = PLANS[kd['plan']]
     remaining = None
@@ -330,7 +335,7 @@ def api_validate():
     else:
         expires_str, days_left = 'Never', 9999
     info = {
-        'key': key, 'plan': kd['plan'], 'plan_name': plan_info['name'],
+        'ok': True, 'key': key, 'plan': kd['plan'], 'plan_name': plan_info['name'],
         'expires': expires_str, 'days_left': max(0, days_left),
         'max_checks': plan_info['max_checks'], 'max_checks_daily': plan_info['max_checks_daily'],
         'remaining_checks': remaining, 'allow_signup': plan_info['allow_signup'],
@@ -341,7 +346,7 @@ def api_validate():
         global _license_info
         _license_info = info
     save_cached_license(info)
-    return jsonify({'ok': True, **info})
+    return info
 
 @app.route('/api/generate', methods=['POST'])
 def api_generate():
@@ -625,21 +630,12 @@ def handle_connect(auth=None):
 
 @socketio.on('validate_license')
 def handle_validate_license(data):
-    key = data.get('key', '').strip().upper()
-    if not key: emit('license_result', {'ok': False, 'error': 'No key provided'}); return
-    try:
-        r = __import__('requests').post(f'http://localhost:{os.environ.get("PORT", 5000)}/api/validate', json={'key': key, 'hwid': get_hwid()}, timeout=5)
-        if r.status_code == 200:
-            d = r.json()
-            if d.get('ok'):
-                emit('license_result', {'ok': True, 'plan': d['plan'], 'plan_name': d['plan_name'], 'expires': d.get('expires','Never'), 'days_left': d.get('days_left',0), 'max_checks': d.get('max_checks',0), 'remaining_checks': d.get('remaining_checks'), 'allow_signup': d.get('allow_signup',False), 'max_workers': d.get('max_workers',5), 'allow_proxy_rotation': d.get('allow_proxy_rotation',False)})
-                emit('log', {'message': f"License validated: {d['plan_name']}", 'type': 'success', 'time': time.time()})
-                return
-            emit('license_result', {'ok': False, 'error': d.get('error','Validation failed')})
-        else:
-            emit('license_result', {'ok': False, 'error': f'Server error: HTTP {r.status_code}'})
-    except Exception as e:
-        emit('license_result', {'ok': False, 'error': str(e)})
+    d = do_validate(key=data.get('key',''), hwid=get_hwid(), remote_addr='0.0.0.0')
+    if d.get('ok'):
+        emit('license_result', {'ok': True, 'plan': d['plan'], 'plan_name': d['plan_name'], 'expires': d.get('expires','Never'), 'days_left': d.get('days_left',0), 'max_checks': d.get('max_checks',0), 'remaining_checks': d.get('remaining_checks'), 'allow_signup': d.get('allow_signup',False), 'max_workers': d.get('max_workers',5), 'allow_proxy_rotation': d.get('allow_proxy_rotation',False)})
+        emit('log', {'message': f"License validated: {d['plan_name']}", 'type': 'success', 'time': time.time()})
+    else:
+        emit('license_result', {'ok': False, 'error': d.get('error', 'Validation failed')})
 
 @socketio.on('get_license')
 def handle_get_license():

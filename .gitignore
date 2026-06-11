@@ -1,0 +1,15 @@
+__pycache__/
+.venv/
+*.pyc
+.license_cache
+licenses.json
+config.json
+proxies.txt
+roblox_hits.txt
+.checked.txt
+pending_signups.json
+scan_history.json
+profiles.json
+*.log
+.DS_Store
+thumbs.db

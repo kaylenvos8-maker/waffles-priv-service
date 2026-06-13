@@ -256,6 +256,8 @@ def background_scan(data):
         socketio.emit('scan_done')
         send_log("Ready.", 'info')
 
+
+
 # ── License client cache (inlined) ──────────────────────────────────
 LICENSE_CACHE_FILE = BASE_DIR / '.license_cache'
 _license_info = None
@@ -621,29 +623,6 @@ def handle_connect(auth=None):
     emit('pending_signups', {'signups': signups})
     success = sum(1 for s in signups if s['status'] == 'signed')
     emit('signup_stats', {'total': len(signups), 'success': success, 'failed': len(signups) - success})
-    server_alive = True
-    lic = get_cached_license()
-    if lic:
-        emit('license_status', {'ok': True, 'plan': lic['plan'], 'plan_name': lic['plan_name'], 'expires': lic.get('expires', 'Never'), 'days_left': lic.get('days_left', 0), 'max_checks': lic.get('max_checks', 0), 'remaining_checks': lic.get('remaining_checks'), 'allow_signup': lic.get('allow_signup', False), 'max_workers': lic.get('max_workers', 5), 'allow_proxy_rotation': lic.get('allow_proxy_rotation', False)})
-    else:
-        emit('license_status', {'ok': False, 'server_alive': server_alive})
-
-@socketio.on('validate_license')
-def handle_validate_license(data):
-    d = do_validate(key=data.get('key',''), hwid=get_hwid(), remote_addr='0.0.0.0')
-    if d.get('ok'):
-        emit('license_result', {'ok': True, 'plan': d['plan'], 'plan_name': d['plan_name'], 'expires': d.get('expires','Never'), 'days_left': d.get('days_left',0), 'max_checks': d.get('max_checks',0), 'remaining_checks': d.get('remaining_checks'), 'allow_signup': d.get('allow_signup',False), 'max_workers': d.get('max_workers',5), 'allow_proxy_rotation': d.get('allow_proxy_rotation',False)})
-        emit('log', {'message': f"License validated: {d['plan_name']}", 'type': 'success', 'time': time.time()})
-    else:
-        emit('license_result', {'ok': False, 'error': d.get('error', 'Validation failed')})
-
-@socketio.on('get_license')
-def handle_get_license():
-    lic = get_cached_license()
-    if lic:
-        emit('license_status', {'ok': True, 'plan': lic['plan'], 'plan_name': lic['plan_name'], 'expires': lic.get('expires','Never'), 'days_left': lic.get('days_left',0), 'max_checks': lic.get('max_checks',0), 'remaining_checks': lic.get('remaining_checks'), 'allow_signup': lic.get('allow_signup',False), 'max_workers': lic.get('max_workers',5), 'allow_proxy_rotation': lic.get('allow_proxy_rotation',False)})
-    else:
-        emit('license_status', {'ok': False})
 
 @socketio.on('get_hits')
 def handle_get_hits(): load_and_emit_hits()
